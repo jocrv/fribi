@@ -1,0 +1,118 @@
+import pywt
+import random
+import os
+import tensorflow as tf
+import pandas as pd
+from fuzzywuzzy import fuzz
+from unidecode import unidecode
+import numpy as np
+
+path_dados = "C:/NeoMed/Projetos/dados/philips/dados_fourier/"
+lista_dados = os.listdir(path_dados)
+
+#### Lendo dados
+df = pd.read_csv("C:/NeoMed/Projetos/dados/philips/dados_philips_anomalias.csv", sep = ";")
+df["fibrilacao"] = 0
+#### Separação dos que tem e os que não tem fibrilação
+lista = []
+for i in range(df.shape[0]):
+    # i = 0
+    texto = df.diagnostico[i].replace("\n", " ").replace("[", "").replace("]", "")
+    if fuzz.partial_ratio("fibrilacao atrial", unidecode(texto.lower())) > 80:
+        lista.append(df.exame[i])
+        df["fibrilacao"][i] = 1
+
+lista_fa = [l.replace("-", "").replace(".pdf", "") for l in lista]
+# lista_com_fa = [d for d in lista_dados if (d.replace("-", "").replace(".npy", "").split("_")[0] in lista_fa) and ("DII_maior" not in d)]
+lista_com_fa = [d for d in lista_dados if (d.replace("-", "").replace(".npy", "").split("_")[0] in lista_fa)]
+lista_sem_fa = list(set(lista_dados) - set(lista_com_fa))
+number = 300
+df = pd.DataFrame({"dados": lista_com_fa + random.sample(lista_sem_fa, 300), "diagnostico": list(np.ones(len(lista_com_fa))) + list(np.zeros(300))})
+df = df.sample(frac = 1).reset_index(drop = True)
+
+
+class Mygenerator(tf.keras.utils.Sequence):
+    def __init__(self, 
+                 df, 
+                 batch_size, 
+                 path_sig, 
+                 wavelet = "gaus3", 
+                 max_scale_wavelet = 100,
+                 savgol = False,
+                 scalogram = False):
+        
+        self.df = df
+        self.batch_size = batch_size
+        self.path_sig = path_sig
+        self.valores_maximos = [913.964, 988.434, 928.221, 1077.847, 916.157, 941.433, 1053.739, 1038.736,
+                                1046.402, 1042.795, 981.875, 1047.67, 1028.904]
+        self.wavelet = wavelet
+        self.max_scale_wavelet = max_scale_wavelet
+        self.savgol = savgol
+        self.scalogram = scalogram
+
+    def __len__(self):
+        return int(np.ceil(len(self.df) / float(self.batch_size)))
+
+    def __getitem__(self, idx):
+        batch_x = self.df.dados.values.tolist()[idx * self.batch_size:(idx + 1) * self.batch_size]
+        batch_y = self.df.loc[idx * self.batch_size:(idx + 1) * self.batch_size, "diagnostico"].values
+        # read your data here using the batch lists, batch_x and batch_y
+        x = []
+        y = []
+        if self.savgol:
+            for filename, index in zip(batch_x, batch_y):
+                temp = np.load(self.path_sig + filename, allow_pickle=True)
+                temp = temp/np.max(np.abs(temp))
+                y.append(index)
+                x.append(np.array(temp))
+        if self.scalogram:
+            for filename, index in zip(batch_x, batch_y):
+                temp = np.load(self.path_sig + filename, allow_pickle=True)
+                lista_wav = []
+                for i in range(1, self.max_scale_wavelet+1):
+                    lista_wav.append(pywt.cwt(data = temp/np.max(np.abs(temp)), scales = i, wavelet = self.wavelet)[0][0])
+                lista_wav = np.array(lista_wav)
+                x.append((lista_wav - lista_wav.min()) / (lista_wav.max() - lista_wav.min()))
+                y.append(index)-+-+-+-+
+        return np.array(x), np.array(y, dtype = np.int8)
+
+dados_train = Mygenerator(df = df, batch_size = 32, path_sig = path_dados)
+
+for x, y in dados_train:
+    break
+
+
+inp = tf.keras.layers.Input((60,1))
+# x = tf.keras.layers.ConvLSTM1D(filters = 64, kernel_size = 3, padding = "same", return_sequences=True)(inp)
+# x = tf.keras.layers.ConvLSTM1D(filters = 64, kernel_size = 3, padding = "same", return_sequences=True, strides = 2)(x)
+conv = tf.keras.layers.Conv1D(64, 3, activation = "relu", padding = "same")(inp)
+pool = tf.keras.layers.MaxPooling1D(2)(conv)
+conv = tf.keras.layers.Conv1D(128, 3, activation = "relu", padding = "same")(pool)
+lstm = tf.keras.layers.Bidirectional(tf.keras.layers.LSTM(128, return_sequences = True))(conv)
+flat = tf.keras.layers.Flatten()(lstm)
+dense = tf.keras.layers.Dense(64, activation = "relu")(flat)
+dense = tf.keras.layers.Dense(1, activation = "sigmoid")(dense)
+model = tf.keras.Model(inputs = inp, outputs = dense)
+
+model.summary()
+model.compile (optimizer = "adam", loss = "binary_crossentropy", metrics = "acc")
+
+model.fit(dados_train, epochs = 50, batch_size = 32, shuffle = True)
+
+y_true = []
+y_pred = []
+for x, y in dados_train:
+    y_pred.append(model.predict(x))
+    y_true.append(y)
+
+y_pred = np.array([y[0] for y_ in y_pred for y in y_])
+y_true = np.array([y for y_ in y_true for y in y_])
+
+
+y_pred[y_pred < 0.5] = 0
+y_pred[y_pred >= 0.5] = 1
+
+from sklearn.metrics import confusion_matrix, classification_report
+confusion_matrix(y_true, y_pred)
+print(classification_report(y_true, y_pred))
