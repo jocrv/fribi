@@ -1,0 +1,2 @@
+- Collaborated with interdisciplinary team to develop algorithms for analyzing EKG signals and detecting fibrillation patterns.
+- Conducted literature reviews and data analysis to inform research methodologies and experimental design.
